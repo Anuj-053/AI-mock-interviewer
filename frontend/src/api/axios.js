@@ -1,0 +1,32 @@
+// =============================================================
+// api/axios.js
+// -------------------------------------------------------------
+// WHAT THIS FILE DOES:
+// Creates ONE shared Axios instance that all our pages use to
+// talk to the backend, and automatically attaches the user's
+// JWT token to every request.
+//
+// WHY WE NEED IT:
+// Without this, we'd have to manually add the Authorization
+// header on every single API call in every page. Doing it once
+// here keeps our page components clean.
+// =============================================================
+
+import axios from "axios";
+
+// Base URL of our Express backend
+const api = axios.create({
+  baseURL: "http://localhost:5000/api",
+});
+
+// An "interceptor" runs before every request is sent.
+// Here we check localStorage for a saved token and attach it.
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem("token");
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+export default api;
