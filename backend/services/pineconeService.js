@@ -14,9 +14,10 @@ function getIndex() {
             apiKey: process.env.PINECONE_API_KEY,
         });
 
-        // We specify the name of the index we created in the Pinecone dashboard
-        // (Note: Make sure you create an index named 'resume-index' with 1536 dimensions in Pinecone!)
-        index = pinecone.Index('resume-index');
+        // We specify the name of the index created in the Pinecone dashboard
+        // Note: For Gemini text-embedding-004 / gemini-embedding-001, create the Pinecone index with 768 dimensions and cosine metric!
+        const indexName = process.env.PINECONE_INDEX_NAME || 'resume-index';
+        index = pinecone.Index(indexName);
     }
 
     return index;
