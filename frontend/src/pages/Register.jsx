@@ -16,7 +16,14 @@ export default function Register() {
             localStorage.setItem('userInfo', JSON.stringify(data));
             navigate('/');
         } catch (error) {
-            setError(error.response?.data?.message || 'Registration failed');
+            const serverMsg = error.response?.data?.message;
+            if (serverMsg) {
+                setError(serverMsg);
+            } else if (error.code === 'ERR_NETWORK' || !error.response) {
+                setError('Cannot reach backend server. Please verify backend is running and VITE_API_BASE_URL is set.');
+            } else {
+                setError(error.message || 'Registration failed');
+            }
         }
     };
 

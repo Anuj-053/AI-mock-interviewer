@@ -14,9 +14,15 @@
 
 import axios from "axios";
 
+let rawBaseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api";
+rawBaseURL = rawBaseURL.trim();
+if (!rawBaseURL.endsWith('/api') && !rawBaseURL.endsWith('/api/')) {
+    rawBaseURL = rawBaseURL.replace(/\/+$/, '') + '/api';
+}
+
 // Base URL of our Express backend
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api",
+  baseURL: rawBaseURL,
 });
 
 // An "interceptor" runs before every request is sent.
