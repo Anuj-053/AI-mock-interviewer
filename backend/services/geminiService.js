@@ -5,7 +5,7 @@ let genAI;
 
 function getClient() {
     if (!process.env.GEMINI_API_KEY) {
-        throw new Error("GEMINI_API_KEY is not set in environment variables");
+        return null;
     }
     if (!genAI) {
         genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -22,6 +22,9 @@ async function getAvailableModel(apiKey) {
     }
     if (cachedActiveModel) {
         return cachedActiveModel;
+    }
+    if (!apiKey) {
+        return "gemini-2.5-flash";
     }
 
     try {
@@ -53,13 +56,17 @@ async function getAvailableModel(apiKey) {
         console.warn("[GeminiService] Dynamic model discovery failed:", e.message);
     }
 
-    // Default to the modern 2.5 flash model
+    // Default to modern 2.5 flash model
     return "gemini-2.5-flash";
 }
 
 // @desc    Takes an array of text chunks and generates embeddings
 const generateEmbeddings = async (textChunks) => {
     const client = getClient();
+    if (!client) {
+        throw new Error("GEMINI_API_KEY not configured for embeddings.");
+    }
+
     const candidateEmbeddingModels = [
         process.env.GEMINI_EMBEDDING_MODEL,
         "text-embedding-004",
@@ -83,7 +90,81 @@ const generateEmbeddings = async (textChunks) => {
     throw new Error("All embedding models failed. Vector search will be gracefully bypassed.");
 };
 
-// Deterministic fallback MCQ bank in case all LLM endpoints are completely unavailable or quota-exhausted
+// @desc    Call Grok API (xAI) as a high-performance fallback or alternative
+async function generateQuestionsWithGrok(context, prompt) {
+    const grokApiKey = process.env.GROK_API_KEY || process.env.XAI_API_KEY;
+    if (!grokApiKey) {
+        return null;
+    }
+
+    const grokModels = [
+        process.env.GROK_MODEL || "grok-2-latest",
+        "grok-beta",
+        "grok-2",
+        "grok-2-vision-1212"
+    ];
+
+    for (const model of grokModels) {
+        try {
+            console.log(`[GrokService] Querying xAI Grok API with model: ${model}...`);
+            const response = await fetch("https://api.x.ai/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${grokApiKey.trim()}`
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: [
+                        { 
+                            role: "system", 
+                            content: "You are a Principal Software Engineer conducting a rigorous technical interview. Return strictly valid JSON containing exactly 10 questions." 
+                        },
+                        { 
+                            role: "user", 
+                            content: prompt 
+                        }
+                    ],
+                    temperature: 0.3
+                })
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                console.warn(`[GrokService] Grok (${model}) returned HTTP ${response.status}: ${errText}`);
+                continue;
+            }
+
+            const data = await response.json();
+            let rawText = data.choices?.[0]?.message?.content?.trim() || "";
+            rawText = rawText.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/g, "").trim();
+
+            let questions = [];
+            try {
+                const parsed = JSON.parse(rawText);
+                questions = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+            } catch (jsonErr) {
+                const jsonMatch = rawText.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    questions = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+                }
+            }
+
+            questions = questions.filter(q => q && q.question && Array.isArray(q.options) && q.options.length >= 2);
+            if (questions.length >= 5) {
+                console.log(`[GrokService] Successfully generated ${questions.length} questions using Grok (${model})!`);
+                return questions;
+            }
+        } catch (err) {
+            console.warn(`[GrokService] Failed with model ${model}:`, err.message);
+        }
+    }
+
+    return null;
+}
+
+// Curated technical question bank in case external cloud APIs are unavailable
 function getFallbackQuestions(context) {
     const skills = [
         { name: "JavaScript / TypeScript", q: "Which of the following is true regarding JavaScript's event loop and microtask queue?", opts: ["Promises are handled in the microtask queue with higher priority than setTimeout", "setTimeout executes before Promise.then()", "The microtask queue only executes when the call stack has 5+ frames", "Microtasks run in a separate OS thread"], correct: 0, exp: "Microtasks (such as resolved Promise callbacks and queueMicrotask) run immediately after the current macrotask completes and before the next macrotask." },
@@ -98,7 +179,7 @@ function getFallbackQuestions(context) {
         { name: "Containerization & Cloud", q: "In Docker, what is the fundamental difference between an Image and a Container?", opts: ["An image is a running instance; a container is the static blueprint", "An image is a static read-only template; a container is a running, stateful instance of that image", "Images require Kubernetes; containers do not", "There is no difference between them"], correct: 1, exp: "A Docker image is an immutable template containing instructions, while a container is a live, executable instance of an image." }
     ];
 
-    return skills.map((item, idx) => ({
+    return skills.map((item) => ({
         question: item.q,
         options: item.opts,
         correctOption: item.correct,
@@ -106,37 +187,8 @@ function getFallbackQuestions(context) {
     }));
 }
 
-// @desc    Takes the retrieved resume chunks and asks Gemini to generate exactly 10 interview questions
+// @desc    Generate 10 technical MCQs: Google Gemini -> Grok (xAI) -> Curated Bank
 const generateQuestions = async (context) => {
-    const client = getClient();
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    // 1. Discover the active model dynamically or use modern fallbacks
-    const candidateModels = [];
-    if (process.env.GEMINI_MODEL) {
-        candidateModels.push(process.env.GEMINI_MODEL);
-    }
-    
-    const discovered = await getAvailableModel(apiKey);
-    if (discovered && !candidateModels.includes(discovered)) {
-        candidateModels.push(discovered);
-    }
-
-    // Modern candidate fallbacks in order of recommendation
-    const standardCandidates = [
-        "gemini-2.5-flash",
-        "gemini-3.8-flash",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-exp",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro",
-    ];
-    for (const model of standardCandidates) {
-        if (!candidateModels.includes(model)) {
-            candidateModels.push(model);
-        }
-    }
-
     const prompt = `You are a Principal Software Engineer conducting a technical interview.
 Based on the candidate's resume context below, generate exactly 10 high-quality technical Multiple Choice Questions (MCQs).
 
@@ -161,43 +213,80 @@ Return ONLY a JSON object:
 Resume Context:
 ${context}`;
 
-    for (const modelName of candidateModels) {
-        try {
-            console.log(`[GeminiService] Attempting question generation with model: ${modelName}`);
-            const model = client.getGenerativeModel({
-                model: modelName,
-                generationConfig: { responseMimeType: "application/json" }
-            });
+    // 1. Primary: Try Google Gemini API with dynamic model discovery
+    const client = getClient();
+    const apiKey = process.env.GEMINI_API_KEY;
 
-            const result = await model.generateContent(prompt);
-            let rawText = result.response.text().trim();
-            rawText = rawText.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/g, "").trim();
+    if (client && apiKey) {
+        const candidateModels = [];
+        if (process.env.GEMINI_MODEL) {
+            candidateModels.push(process.env.GEMINI_MODEL);
+        }
+        
+        const discovered = await getAvailableModel(apiKey);
+        if (discovered && !candidateModels.includes(discovered)) {
+            candidateModels.push(discovered);
+        }
 
-            let questions = [];
+        const standardCandidates = [
+            "gemini-2.5-flash",
+            "gemini-3.8-flash",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-exp",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro",
+        ];
+        for (const model of standardCandidates) {
+            if (!candidateModels.includes(model)) {
+                candidateModels.push(model);
+            }
+        }
+
+        for (const modelName of candidateModels) {
             try {
-                const parsed = JSON.parse(rawText);
-                questions = Array.isArray(parsed) ? parsed : (parsed.questions || []);
-            } catch (jsonErr) {
-                const jsonMatch = rawText.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-                if (jsonMatch) {
-                    const parsed = JSON.parse(jsonMatch[0]);
+                console.log(`[GeminiService] Attempting question generation with Google Gemini: ${modelName}`);
+                const model = client.getGenerativeModel({
+                    model: modelName,
+                    generationConfig: { responseMimeType: "application/json" }
+                });
+
+                const result = await model.generateContent(prompt);
+                let rawText = result.response.text().trim();
+                rawText = rawText.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/g, "").trim();
+
+                let questions = [];
+                try {
+                    const parsed = JSON.parse(rawText);
                     questions = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+                } catch (jsonErr) {
+                    const jsonMatch = rawText.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+                    if (jsonMatch) {
+                        const parsed = JSON.parse(jsonMatch[0]);
+                        questions = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+                    }
                 }
-            }
 
-            questions = questions.filter(q => q && q.question && Array.isArray(q.options) && q.options.length >= 2);
+                questions = questions.filter(q => q && q.question && Array.isArray(q.options) && q.options.length >= 2);
 
-            if (questions.length >= 5) {
-                console.log(`[GeminiService] Successfully generated ${questions.length} questions using ${modelName}`);
-                return questions;
+                if (questions.length >= 5) {
+                    console.log(`[GeminiService] Successfully generated ${questions.length} questions using Gemini (${modelName})`);
+                    return questions;
+                }
+            } catch (err) {
+                console.warn(`[GeminiService] Gemini model ${modelName} failed (${err.message}). Trying next option...`);
             }
-        } catch (err) {
-            console.warn(`[GeminiService] Model ${modelName} failed (${err.message}). Trying next candidate...`);
         }
     }
 
-    // If all online models fail (e.g. rate limit, quota, Google downtime), return the curated technical question bank
-    console.warn("[GeminiService] All online AI generation attempts failed. Using fallback technical interview set.");
+    // 2. Secondary Failover: Try xAI Grok API
+    console.log("[Service] Falling over to Grok API (xAI)...");
+    const grokQuestions = await generateQuestionsWithGrok(context, prompt);
+    if (grokQuestions && grokQuestions.length >= 5) {
+        return grokQuestions;
+    }
+
+    // 3. Tertiary Failover: Curated Technical Questions (guarantees zero downtime)
+    console.warn("[Service] All cloud LLM endpoints failed or not configured. Using high-availability question bank.");
     return getFallbackQuestions(context);
 };
 
