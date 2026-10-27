@@ -1,23 +1,47 @@
 const { Pinecone } = require("@pinecone-database/pinecone");
 require("dotenv").config();
 
-let index;
+let pineconeClient;
 
-function getIndex() {
+function getPineconeClient() {
     if (!process.env.PINECONE_API_KEY) {
-        throw new Error("PINECONE_API_KEY is not set");
+        throw new Error("PINECONE_API_KEY is not set in environment variables");
     }
-
-    if (!index) {
-        // 1. Initialize the Pinecone client
-        const pinecone = new Pinecone({
+    if (!pineconeClient) {
+        pineconeClient = new Pinecone({
             apiKey: process.env.PINECONE_API_KEY,
         });
+    }
+    return pineconeClient;
+}
 
-        // We specify the name of the index created in the Pinecone dashboard
-        // Note: For Gemini text-embedding-004 / gemini-embedding-001, create the Pinecone index with 768 dimensions and cosine metric!
-        const indexName = process.env.PINECONE_INDEX_NAME || 'resume-index';
-        index = pinecone.Index(indexName);
+async function getIndex() {
+    const pc = getPineconeClient();
+    const indexName = process.env.PINECONE_INDEX_NAME || 'resume-index';
+
+    if (!index) {
+        try {
+            const indexList = await pc.listIndexes();
+            const names = (indexList.indexes || []).map(idx => idx.name);
+            if (!names.includes(indexName)) {
+                console.log(`Index "${indexName}" not found in Pinecone. Creating it automatically (dimension 768, cosine, AWS serverless)...`);
+                await pc.createIndex({
+                    name: indexName,
+                    dimension: 768,
+                    metric: 'cosine',
+                    spec: {
+                        serverless: {
+                            cloud: 'aws',
+                            region: 'us-east-1'
+                        }
+                    }
+                });
+                console.log(`Index "${indexName}" created successfully!`);
+            }
+        } catch (err) {
+            console.warn(`Pinecone auto-check warning:`, err.message);
+        }
+        index = pc.Index(indexName);
     }
 
     return index;
@@ -29,7 +53,7 @@ function getIndex() {
 // @param   {Array} embeddings - The mathematical vectors from OpenAI (e.g. [[0.1, 0.2...]])
 const storeEmbeddingsInPinecone = async (userId, chunks, embeddings) => {
     try {
-        const activeIndex = getIndex();
+        const activeIndex = await getIndex();
 
         // 2. Prepare the data format that Pinecone expects
         const records = chunks.map((chunk, i) => ({
@@ -61,7 +85,7 @@ const storeEmbeddingsInPinecone = async (userId, chunks, embeddings) => {
 // @returns {string} A combined string of the top matching resume chunks
 const retrieveRelevantChunks = async (userId, queryVector) => {
     try {
-        const activeIndex = getIndex();
+        const activeIndex = await getIndex();
 
         // 1. Query the Pinecone index inside the specific user's namespace
         const queryResponse = await activeIndex.namespace(userId).query({
