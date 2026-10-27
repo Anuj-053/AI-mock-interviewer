@@ -31,40 +31,59 @@ const startInterview = async (req, res) => {
         }
 
         // 1. Extract Text
-        console.log("Extracting text...");
+        console.log("Extracting text from PDF...");
         const text = await extractTextFromPDF(filePath);
+
+        if (!text || text.trim().length === 0) {
+            return res.status(400).json({ 
+                message: "No readable text found in the PDF. Please upload a standard text PDF resume." 
+            });
+        }
 
         // 2. Chunk Text
         console.log("Chunking text...");
         const chunks = chunkText(text);
 
-        // 3. Generate Embeddings
-        console.log("Generating embeddings...");
-        const embeddings = await generateEmbeddings(chunks);
+        // 3. Attempt RAG (Embeddings + Pinecone vector retrieval)
+        let context = "";
+        try {
+            console.log("Generating embeddings and searching Pinecone...");
+            const embeddings = await generateEmbeddings(chunks);
+            await storeEmbeddingsInPinecone(user._id.toString(), chunks, embeddings);
+            
+            const queryVector = (
+                await generateEmbeddings([
+                    "core technical skills and professional experience",
+                ])
+            )[0];
+            context = await retrieveRelevantChunks(user._id.toString(), queryVector);
+            console.log("Pinecone retrieval successful!");
+        } catch (ragError) {
+            console.warn("Vector search bypassed (falling back to direct resume context):", ragError.message);
+            // Fallback: take the most relevant chunks directly from the resume
+            context = chunks.slice(0, 10).join("\n\n");
+        }
 
-        // 4. Store in Pinecone
-        console.log("Storing in Pinecone...");
-        await storeEmbeddingsInPinecone(user._id.toString(), chunks, embeddings);
+        // If context is still empty or minimal, use the extracted resume text directly
+        if (!context || context.trim().length < 50) {
+            context = text.slice(0, 4000);
+        }
 
-        // 5. Retrieve Relevant Chunks (we query for "core technical skills and professional experience")
-        console.log("Retrieving relevant context...");
-        const queryVector = (
-            await generateEmbeddings([
-                "core technical skills and professional experience",
-            ])
-        )[0];
-        const context = await retrieveRelevantChunks(user._id.toString(), queryVector);
-
-        // 6. Generate Questions
-        console.log("Generating questions...");
+        // 4. Generate Questions with Gemini
+        console.log("Generating 10 MCQs with Gemini...");
         const questions = await generateQuestions(context);
 
-        // 7. Save to MongoDB
+        if (!questions || questions.length === 0) {
+            throw new Error("AI could not generate questions from the resume. Please try again.");
+        }
+
+        // 5. Save to MongoDB
         const interview = await Interview.create({
             user: user._id,
             questions: questions
         });
 
+        console.log(`Interview created successfully with ${questions.length} questions.`);
         res.status(201).json(interview);
     } catch (error) {
         console.error("Start interview error:", error);
