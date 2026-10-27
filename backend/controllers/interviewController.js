@@ -1,4 +1,5 @@
 const path = require("path");
+const fs = require("fs");
 const User = require("../models/User");
 const Interview = require("../models/Interview");
 const { extractTextFromPDF } = require("../utils/pdfParser");
@@ -23,6 +24,11 @@ const startInterview = async (req, res) => {
         }
 
         const filePath = path.join(process.cwd(), 'uploads', user.resumeFilename);
+        if (!fs.existsSync(filePath)) {
+            return res.status(400).json({ 
+                message: "Uploaded resume file is no longer on the server. Please re-upload your resume PDF." 
+            });
+        }
 
         // 1. Extract Text
         console.log("Extracting text...");
@@ -61,8 +67,8 @@ const startInterview = async (req, res) => {
 
         res.status(201).json(interview);
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: "Failed to start interview." });
+        console.error("Start interview error:", error);
+        res.status(500).json({ message: error.message || "Failed to start interview." });
     }
 };
 

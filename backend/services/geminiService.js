@@ -18,18 +18,27 @@ const generateEmbeddings = async (textChunks) => {
     try {
         const client = getClient();
         // Google's embedding model outputs 768 dimensions
-        const model = client.getGenerativeModel({ model: "gemini-embedding-001" });
+        // text-embedding-004 is current standard; fallback to embedding-001
+        const modelName = process.env.GEMINI_EMBEDDING_MODEL || "text-embedding-004";
+        const model = client.getGenerativeModel({ model: modelName });
         
         const embeddings = [];
         // Process each chunk to get its embedding vector
         for (const chunk of textChunks) {
-            const result = await model.embedContent(chunk);
+            let result;
+            try {
+                result = await model.embedContent(chunk);
+            } catch (err) {
+                // If text-embedding-004 is unavailable, retry with legacy embedding-001
+                const fallbackModel = client.getGenerativeModel({ model: "embedding-001" });
+                result = await fallbackModel.embedContent(chunk);
+            }
             embeddings.push(result.embedding.values);
         }
         return embeddings;
     } catch (error) {
         console.error("Gemini embedding error:", error);
-        throw new Error("Failed to generate embeddings");
+        throw new Error(`Failed to generate embeddings: ${error.message}`);
     }
 };
 
@@ -37,8 +46,9 @@ const generateEmbeddings = async (textChunks) => {
 const generateQuestions = async (context) => {
     try {
         const client = getClient();
+        const modelName = process.env.GEMINI_MODEL || "gemini-1.5-flash";
         const model = client.getGenerativeModel({ 
-            model: "gemini-flash-latest", // Fast and free tier available
+            model: modelName,
             generationConfig: { responseMimeType: "application/json" }
         });
 
@@ -71,7 +81,7 @@ ${context}`;
         return parsed.questions || [];
     } catch (error) {
         console.error("Gemini questions error:", error);
-        throw new Error("Failed to generate interview questions");
+        throw new Error(`Failed to generate interview questions: ${error.message}`);
     }
 };
 

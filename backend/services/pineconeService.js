@@ -51,7 +51,7 @@ const storeEmbeddingsInPinecone = async (userId, chunks, embeddings) => {
         console.log(`Successfully saved ${records.length} chunks to Pinecone for user ${userId}`);
     } catch (error) {
         console.error("Error storing embeddings in Pinecone:", error);
-        throw new Error("Failed to store data in vector database");
+        throw new Error(`Failed to store data in Pinecone: ${error.message}`);
     }
 };
 
@@ -78,7 +78,7 @@ const retrieveRelevantChunks = async (userId, queryVector) => {
         return relevantTextChunks.join('\n\n');
     } catch (error) {
         console.error("Error retrieving chunks from Pinecone:", error);
-        throw new Error("Failed to retrieve context from vector database");
+        throw new Error(`Failed to retrieve context from Pinecone: ${error.message}`);
     }
 };
 
